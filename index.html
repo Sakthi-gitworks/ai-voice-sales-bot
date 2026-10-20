@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>AI Voice Sales Bot</title>
+<style>
+body{font-family:system-ui,sans-serif;max-width:860px;margin:0 auto;padding:16px;background:#f5f6f8;color:#1b1f24}
+.card{background:#fff;border-radius:12px;padding:16px;margin-bottom:14px;box-shadow:0 1px 3px #0002}
+textarea,select{width:100%;padding:8px;border:1px solid #ccd;border-radius:8px;font:inherit;box-sizing:border-box}
+button{padding:10px 18px;border:0;border-radius:8px;font:inherit;cursor:pointer;color:#fff}
+#start{background:#16a34a}#end{background:#dc2626}button:disabled{opacity:.4;cursor:not-allowed}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+#chat{height:260px;overflow:auto;background:#fafbfc;border:1px solid #e3e6ea;border-radius:8px;padding:8px}
+.m{margin:6px 0;padding:8px 10px;border-radius:10px;max-width:80%}
+.bot{background:#e0ecff}.user{background:#e6f7e6;margin-left:auto}
+.badge{padding:2px 10px;border-radius:99px;background:#e5e7eb;font-size:13px}
+details{border-top:1px solid #eee;padding:8px 0}summary{cursor:pointer}
+</style></head><body>
+<h2>🎙️ AI Voice Sales Bot</h2>
+<div id="warn" class="card" style="display:none;background:#fff3cd">Voice input needs Google Chrome or Microsoft Edge.</div>
+<div class="card">
+  <label><b>SaaS product to sell</b></label>
+  <textarea id="product" rows="3">FlowDesk: a project-management SaaS for small teams. Features: task boards, team chat, time tracking, reports. Free 14-day trial; book a demo anytime.</textarea>
+  <div class="row" style="margin-top:10px">
+    <select id="lang" style="width:auto"><option value="en-IN">English</option></select>
+    <label><input type="checkbox" id="consent"> I consent to this call being recorded (my microphone audio) and transcribed.</label>
+  </div>
+</div>
+<div class="card">
+  <div class="row"><button id="start" disabled>📞 Start Call</button><button id="end" disabled>⛔ End Call</button>
+    <span>Status: <span class="badge" id="status">Idle</span></span><span>Duration: <b id="dur">00:00</b></span></div>
+  <p><b>Live conversation</b></p><div id="chat"></div>
+</div>
+<div class="card" id="result" style="display:none"></div>
+<div class="card"><h3>Call history <button id="clr" style="background:#6b7280;font-size:13px;padding:4px 10px">Clear history</button></h3><div id="history">No calls yet.</div></div>
+<script>
+const $=id=>document.getElementById(id);
+const SR=window.SpeechRecognition||window.webkitSpeechRecognition;
+if(!SR)$('warn').style.display='block';
+let rec,mr,chunks=[],stream,hist=[],log=[],t0,timer,active=false,busy=false,quiet=0,nudged=false;
+const db=new Promise(r=>{const q=indexedDB.open('calls',1);q.onupgradeneeded=()=>q.result.createObjectStore('c',{keyPath:'id'});q.onsuccess=()=>r(q.result)});
+async function put(o){const d=await db;return new Promise(r=>{const t=d.transaction('c','readwrite');t.objectStore('c').put(o);t.oncomplete=r})}
+async function all(){const d=await db;return new Promise(r=>{const q=d.transaction('c').objectStore('c').getAll();q.onsuccess=()=>r(q.result)})}
+const setStatus=s=>$('status').textContent=s;
+const esc=s=>String(s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+function add(role,text){log.push({role,text});const d=document.createElement('div');d.className='m '+role;d.textContent=(role=='bot'?'🤖 Bot: ':'🧑 You: ')+text;$('chat').appendChild(d);$('chat').scrollTop=1e9}
+function speak(t){return new Promise(r=>{const u=new SpeechSynthesisUtterance(t);u.lang=$('lang').value;u.onend=u.onerror=r;speechSynthesis.cancel();speechSynthesis.speak(u)})}
+async function api(p,b){const r=await fetch(p,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});if(!r.ok)throw new Error(await r.text());return r.json()}
+async function botTurn(){
+  busy=true;setStatus('Thinking...');
+  try{
+    const{reply}=await api('/api/chat',{product:$('product').value,language:$('lang').selectedOptions[0].text,history:hist});
+    if(!active)return;
+    hist.push({role:'assistant',content:reply});add('bot',reply);setStatus('Speaking...');await speak(reply);
+  }catch(e){add('bot','(Error: '+e.message.slice(0,120)+')');}
+  busy=false;quiet=Date.now();listen();
+}
+async function nudge(t,hangup){
+  busy=true;add('bot',t);setStatus('Speaking...');await speak(t);busy=false;quiet=Date.now();if(hangup)$('end').click();else listen()
+}
+function listen(){
+  if(!active)return;setStatus('Listening...');
+  rec=new SR();rec.lang=$('lang').value;rec.interimResults=false;let got=false;
+  rec.onresult=e=>{got=true;nudged=false;const t=e.results[0][0].transcript;add('user',t);hist.push({role:'user',content:t});botTurn()};
+  rec.onend=()=>{if(!active||got||busy)return;
+  if(Date.now()-quiet>12000){
+    if(!nudged){nudged=true;nudge('Hello, are you still there?',false);return}
+    nudge('It seems this is not a good time. I will try again later. Goodbye!',true);return}
+  setTimeout(listen,200)};
+  rec.onerror=()=>{};
+  try{rec.start()}catch(e){}
+}
+$('consent').onchange=()=>$('start').disabled=!$('consent').checked||!SR;
+$('start').onclick=async()=>{
+  try{stream=await navigator.mediaDevices.getUserMedia({audio:true})}catch(e){alert('Microphone access is needed.');return}
+  hist=[{role:'user',content:'(The call just connected. Greet the customer and start the conversation.)'}];log=[];chunks=[];
+  $('chat').innerHTML='';$('result').style.display='none';
+  mr=new MediaRecorder(stream);mr.ondataavailable=e=>chunks.push(e.data);mr.start();
+  active=true;t0=Date.now();$('start').disabled=true;$('end').disabled=false;
+  timer=setInterval(()=>{const s=Math.floor((Date.now()-t0)/1000);$('dur').textContent=String(Math.floor(s/60)).padStart(2,'0')+':'+String(s%60).padStart(2,'0')},500);
+  botTurn();
+};
+$('end').onclick=async()=>{
+  active=false;clearInterval(timer);speechSynthesis.cancel();try{rec&&rec.abort()}catch(e){}
+  $('end').disabled=true;setStatus('Summarizing...');
+  const secs=Math.floor((Date.now()-t0)/1000);
+  const blob=await new Promise(r=>{mr.onstop=()=>r(new Blob(chunks,{type:mr.mimeType}));mr.stop()});
+  stream.getTracks().forEach(t=>t.stop());
+  let sum;
+  if(!log.some(m=>m.role=='user'))sum={summary:'The customer did not respond during the call.',requirements:'-',objections:'-',next_steps:'Try calling again later.',status:'No Response'};
+  else try{sum=await api('/api/summary',{product:$('product').value,transcript:log.map(m=>(m.role=='bot'?'Bot: ':'Customer: ')+m.text).join('\n')})}
+  catch(e){sum={summary:'Summary failed: '+e.message.slice(0,100),requirements:'-',objections:'-',next_steps:'-',status:'Follow-up Required'}}
+  await put({id:Date.now(),secs,log,sum,blob});
+  $('result').style.display='block';
+  $('result').innerHTML='<h3>AI Summary <span class="badge">'+esc(sum.status)+'</span></h3><p>'+esc(sum.summary)+'</p><p><b>Requirements:</b> '+esc(sum.requirements)+'</p><p><b>Objections:</b> '+esc(sum.objections)+'</p><p><b>Next steps:</b> '+esc(sum.next_steps)+'</p>';
+  setStatus('Ended');$('start').disabled=!$('consent').checked;render();
+};
+async function render(){
+  const items=(await all()).sort((a,b)=>b.id-a.id);if(!items.length)return;
+  $('history').innerHTML=items.map(c=>'<details><summary><span class="badge">'+esc(c.sum.status)+'</span> '+new Date(c.id).toLocaleString()+' · '+c.secs+'s · '+esc(c.sum.summary.slice(0,70))+'</summary><p>'+esc(c.sum.summary)+'</p><p><b>Next steps:</b> '+esc(c.sum.next_steps)+'</p><audio controls src="'+URL.createObjectURL(c.blob)+'"></audio><p style="white-space:pre-wrap">'+c.log.map(m=>(m.role=='bot'?'Bot: ':'Customer: ')+esc(m.text)).join('\n')+'</p></details>').join('');
+}
+$('clr').onclick=async()=>{if(!confirm('Delete all saved calls?'))return;const d=await db;await new Promise(r=>{const t=d.transaction('c','readwrite');t.objectStore('c').clear();t.oncomplete=r});$('history').textContent='No calls yet.'};
+render();
+</script></body></html>
